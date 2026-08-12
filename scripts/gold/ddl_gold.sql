@@ -17,108 +17,79 @@ Usage:
 -- =============================================================================
 -- Create Dimension: gold.dim_customers
 -- =============================================================================
-
-/* Build Gold Layer Create Dimension Customers */
-
 IF OBJECT_ID('gold.dim_customers', 'V') IS NOT NULL
     DROP VIEW gold.dim_customers;
+GO
 
-create view gold.dim_customers as
-select
-	row_number() over (order by cst_id) as customer_key,
-	ci.cst_id as customer_id,
-	ci.cst_key as customer_number,
-	ci.cst_firstname as first_name,
-	ci.cst_lastname as last_name,
-	la.cntry as country,
-	ci.cst_marital_status as marital_status,
-	case when ci.cst_gndr != 'n/a' then ci.cst_gndr -- CRM is the master for gender info
-		else coalesce(ca.gen, 'n/a')
-	end as gender, 
-	ca.bdate as birthdate,
-	ci.cst_create_date as create_date
-	
+CREATE VIEW gold.dim_customers AS
+SELECT
+    ROW_NUMBER() OVER (ORDER BY cst_id) AS customer_key, -- Surrogate key
+    ci.cst_id                          AS customer_id,
+    ci.cst_key                         AS customer_number,
+    ci.cst_firstname                   AS first_name,
+    ci.cst_lastname                    AS last_name,
+    la.cntry                           AS country,
+    ci.cst_marital_status              AS marital_status,
+    CASE 
+        WHEN ci.cst_gndr != 'n/a' THEN ci.cst_gndr -- CRM is the primary source for gender
+        ELSE COALESCE(ca.gen, 'n/a')  			   -- Fallback to ERP data
+    END                                AS gender,
+    ca.bdate                           AS birthdate,
+    ci.cst_create_date                 AS create_date
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erp_cust_az12 ca
+    ON ci.cst_key = ca.cid
+LEFT JOIN silver.erp_loc_a101 la
+    ON ci.cst_key = la.cid;
+GO
 
-from silver.crm_cust_info ci
-left join silver.erp_cust_az12 ca
-on ci.cst_key = ca.cid
-left join silver.erp_loc_a101 la
-on ci.cst_key = la.cid
-
-/* We have to do data integration because when you run above query then you will find two columns of gender so we don't 
-need two columns that's why we have to do data integration */
-
-select distinct
-	ci.cst_gndr,
-	ca.gen,
-	case when ci.cst_gndr != 'n/a' then ci.cst_gndr -- CRM is the master for gender info
-		else coalesce(ca.gen, 'n/a')
-	end as new_gen
-from silver.crm_cust_info ci
-left join silver.erp_cust_az12 ca
-on ci.cst_key = ca.cid
-left join silver.erp_loc_a101 la
-on ci.cst_key = la.cid
-order by 1,2
-
--- check the quality of gold table 
-
-select * from gold.dim_customers
-
-select distinct gender from gold.dim_customers
-
-/* Build Gold Layer Create Dimension Products */
-
+-- =============================================================================
+-- Create Dimension: gold.dim_products
+-- =============================================================================
 IF OBJECT_ID('gold.dim_products', 'V') IS NOT NULL
     DROP VIEW gold.dim_products;
+GO
 
-create view gold.dim_products as
-select
-	row_number() over (order by pn.prd_start_dt, pn.prd_key) as product_key,
-	pn.prd_id as product_id,
-	pn.prd_key as product_number,
-	pn.prd_nm as product_name,
-	pn.cat_id as category_id,
-	pc.cat as category,
-	pc.subcat as subcategory,
-	pc.maintenance,
-	pn.prd_cost as cost,
-	pn.prd_line as product_line,
-	pn.prd_start_dt as start_date
-	
-from silver.crm_prd_info pn
-left join silver.erp_px_cat_g1v2 pc
-on pn.cat_id = pc.id
-where prd_end_dt is null --filter out all historical data
+CREATE VIEW gold.dim_products AS
+SELECT
+    ROW_NUMBER() OVER (ORDER BY pn.prd_start_dt, pn.prd_key) AS product_key, -- Surrogate key
+    pn.prd_id       AS product_id,
+    pn.prd_key      AS product_number,
+    pn.prd_nm       AS product_name,
+    pn.cat_id       AS category_id,
+    pc.cat          AS category,
+    pc.subcat       AS subcategory,
+    pc.maintenance  AS maintenance,
+    pn.prd_cost     AS cost,
+    pn.prd_line     AS product_line,
+    pn.prd_start_dt AS start_date
+FROM silver.crm_prd_info pn
+LEFT JOIN silver.erp_px_cat_g1v2 pc
+    ON pn.cat_id = pc.id
+WHERE pn.prd_end_dt IS NULL; -- Filter out all historical data
+GO
 
-/* Build Gold Layer Create Create Fact Sales */
-
+-- =============================================================================
+-- Create Fact Table: gold.fact_sales
+-- =============================================================================
 IF OBJECT_ID('gold.fact_sales', 'V') IS NOT NULL
     DROP VIEW gold.fact_sales;
+GO
 
-create view gold.fact_sales as
-select
-sd.sls_ord_num as order_number,
-pr.product_key,
-cu.customer_key,
-sd.sls_order_dt as order_date,
-sd.sls_ship_dt as shipping_date,
-sd.sls_due_dt as due_date,
-sd.sls_sales as sales_amount,
-sd.sls_quantity as quantity,
-sd.sls_price price
-from silver.crm_sales_details sd
-left join gold.dim_products pr
-on sd.sls_prd_key = pr.product_number
-left join gold.dim_customers cu
-on sd.sls_cust_id = cu.customer_id
-
--- Fact check : check if all dimensions tables can successfully join to the fact table.
-
-select *
-from gold.fact_sales f
-left join gold.dim_customers c
-on c.customer_key = f.customer_key
-left join gold.dim_products p
-on p.product_key = f.product_key
-where p.product_key is null
+CREATE VIEW gold.fact_sales AS
+SELECT
+    sd.sls_ord_num  AS order_number,
+    pr.product_key  AS product_key,
+    cu.customer_key AS customer_key,
+    sd.sls_order_dt AS order_date,
+    sd.sls_ship_dt  AS shipping_date,
+    sd.sls_due_dt   AS due_date,
+    sd.sls_sales    AS sales_amount,
+    sd.sls_quantity AS quantity,
+    sd.sls_price    AS price
+FROM silver.crm_sales_details sd
+LEFT JOIN gold.dim_products pr
+    ON sd.sls_prd_key = pr.product_number
+LEFT JOIN gold.dim_customers cu
+    ON sd.sls_cust_id = cu.customer_id;
+GO
